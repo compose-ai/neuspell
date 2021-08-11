@@ -10,13 +10,6 @@ from torch.nn.utils.rnn import pad_sequence
 from .util import is_module_available, get_module_or_attr
 from ..commons import ALLENNLP_ELMO_PRETRAINED_FOLDER
 
-DEFAULT_BERT_PRETRAINED_NAME_OR_PATH = "bert-base-cased"
-
-
-def get_pretrained_bert(pretrained_name_or_path=None):
-    pretrained_name_or_path = pretrained_name_or_path or DEFAULT_BERT_PRETRAINED_NAME_OR_PATH
-    return transformers.AutoModel.from_pretrained(pretrained_name_or_path)
-
 
 def get_pretrained_elmo(elmo_options_file=None, elmo_weights_file=None):
     if not is_module_available("allennlp"):
@@ -39,6 +32,10 @@ def get_pretrained_elmo(elmo_options_file=None, elmo_weights_file=None):
     elmo_weights_file = elmo_weights_file or local_weights_file or weights_file  # or os.environ.get('ELMO_WEIGHTS_FILE_PATH', None)
     # neuspell.seq_modeling.models.get_pretrained_elmo()
     return Elmo(elmo_options_file, elmo_weights_file, 1)  # 1 for setting device="cuda:0" else 0
+
+
+def get_pretrained_bert(pretrained_name_or_path="bert-base-cased"):
+    return transformers.BertModel.from_pretrained(pretrained_name_or_path)
 
 
 #################################################
@@ -161,7 +158,7 @@ class CharCNNWordLSTMModel(nn.Module):
                 topk_inds = torch.argmax(probs, dim=-1)  # [BS,max_nwords]
 
             # Note that for those positions with padded_idx,
-            #   the arg_max_prob above computes a index because 
+            #   the arg_max_prob above computes a index because
             #   the bias term leads to non-uniform values in those positions
 
             return loss.cpu().detach().numpy(), topk_inds.cpu().detach().numpy()
@@ -202,7 +199,7 @@ class CharLSTMModel(nn.Module):
 
         # lstm
         # dim: [BS,max_nwords,*]->[BS,max_nwords,self.lstmmodule_outdim]
-        embs_packed = pack_padded_sequence(embs, batch_lengths, batch_first=True, enforce_sorted=False)
+        embs_packed = pack_padded_sequence(embs, batch_lengths.cpu(), batch_first=True, enforce_sorted=False)
         lstm_encodings, (last_hidden_states, last_cell_states) = self.lstmmodule(embs_packed)
         lstm_encodings, _ = pad_packed_sequence(lstm_encodings, batch_first=True, padding_value=0)
 
@@ -276,7 +273,7 @@ class CharLSTMWordLSTMModel(nn.Module):
 
         # lstm
         # dim: [BS,max_nwords,*]->[BS,max_nwords,self.lstmmodule_outdim]
-        intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths,
+        intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths.cpu(),
                                                       batch_first=True, enforce_sorted=False)
         lstm_encodings, (last_hidden_states, last_cell_states) = self.lstmmodule(intermediate_encodings)
         lstm_encodings, _ = pad_packed_sequence(lstm_encodings, batch_first=True, padding_value=0)
@@ -302,7 +299,7 @@ class CharLSTMWordLSTMModel(nn.Module):
                 topk_inds = torch.argmax(probs, dim=-1)  # [BS,max_nwords]
 
             # Note that for those positions with padded_idx,
-            #   the arg_max_prob above computes a index because 
+            #   the arg_max_prob above computes a index because
             #   the bias term leads to non-uniform values in those positions
 
             return loss.cpu().detach().numpy(), topk_inds.cpu().detach().numpy()
@@ -351,7 +348,7 @@ class SCLSTM(nn.Module):
 
         # lstm
         # dim: [BS,max_nwords,*]->[BS,max_nwords,self.lstmmodule_outdim]
-        intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths,
+        intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths.cpu(),
                                                       batch_first=True, enforce_sorted=False)
         lstm_encodings, (last_hidden_states, last_cell_states) = self.lstmmodule(intermediate_encodings)
         lstm_encodings, _ = pad_packed_sequence(lstm_encodings, batch_first=True, padding_value=0)
@@ -377,7 +374,7 @@ class SCLSTM(nn.Module):
                 topk_inds = torch.argmax(probs, dim=-1)  # [BS,max_nwords]
 
             # Note that for those positions with padded_idx,
-            #   the arg_max_prob above computes a index because 
+            #   the arg_max_prob above computes a index because
             #   the bias term leads to non-uniform values in those positions
 
             return loss.cpu().detach().numpy(), topk_inds.cpu().detach().numpy()
@@ -451,7 +448,7 @@ class ElmoSCLSTM(nn.Module):
 
             # lstm
             # dim: [BS,max_nwords,*]->[BS,max_nwords,self.lstmmodule_outdim]
-            intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths,
+            intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths.cpu(),
                                                           batch_first=True, enforce_sorted=False)
             lstm_encodings, (last_hidden_states, last_cell_states) = self.lstmmodule(intermediate_encodings)
             lstm_encodings, _ = pad_packed_sequence(lstm_encodings, batch_first=True, padding_value=0)
@@ -469,7 +466,7 @@ class ElmoSCLSTM(nn.Module):
 
                 # lstm
             # dim: [BS,max_nwords,*]->[BS,max_nwords,self.lstmmodule_outdim]
-            intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths,
+            intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths.cpu(),
                                                           batch_first=True, enforce_sorted=False)
             lstm_encodings, (last_hidden_states, last_cell_states) = self.lstmmodule(intermediate_encodings)
             lstm_encodings, _ = pad_packed_sequence(lstm_encodings, batch_first=True, padding_value=0)
@@ -502,7 +499,7 @@ class ElmoSCLSTM(nn.Module):
                     raise Exception("topk can be one of a value>=1")
 
                 # Note that for those positions with padded_idx,
-                #   the arg_max_prob above computes a index because 
+                #   the arg_max_prob above computes a index because
                 #   the bias term leads to non-uniform values in those positions
 
                 return loss.cpu().detach().numpy(), topk_inds.cpu().detach().numpy()
@@ -580,7 +577,7 @@ class SubwordElmo(nn.Module):
                     raise Exception("topk can be one of a value>=1")
 
                 # Note that for those positions with padded_idx,
-                #   the arg_max_prob above computes a index because 
+                #   the arg_max_prob above computes a index because
                 #   the bias term leads to non-uniform values in those positions
 
                 return loss.cpu().detach().numpy(), topk_inds.cpu().detach().numpy()
@@ -627,7 +624,7 @@ class ElmoSCTransformer(nn.Module):
         nhead, hidden_size, nlayers = 8, 1024, 1
         self.transmodule_indim = screp_dim + 2 + 1024
         print(self.transmodule_indim)
-        # self.transmodule = nn.LSTM(self.transmodule_indim, hidden_size, nlayers, 
+        # self.transmodule = nn.LSTM(self.transmodule_indim, hidden_size, nlayers,
         #                             batch_first=True, dropout=0.3, bidirectional=bidirectional)
         encoder_layer = torch.nn.TransformerEncoderLayer(d_model=self.transmodule_indim, nhead=nhead,
                                                          dim_feedforward=hidden_size, dropout=0.3, activation='relu')
@@ -692,7 +689,7 @@ class ElmoSCTransformer(nn.Module):
                 topk_inds = torch.argmax(probs, dim=-1)  # [BS,max_nwords]
 
             # Note that for those positions with padded_idx,
-            #   the arg_max_prob above computes a index because 
+            #   the arg_max_prob above computes a index because
             #   the bias term leads to non-uniform values in those positions
 
             return loss.cpu().detach().numpy(), topk_inds.cpu().detach().numpy()
@@ -710,18 +707,16 @@ import torch
 
 
 class BertSCLSTM(nn.Module):
-    def __init__(self, screp_dim, padding_idx, output_dim, early_concat=True,
-                 bert_pretrained_name_or_path=None, freeze_bert=False):
+    def __init__(self, screp_dim, padding_idx, output_dim, early_concat=True):
         super(BertSCLSTM, self).__init__()
 
         self.bert_dropout = torch.nn.Dropout(0.2)
-        self.bert_model = get_pretrained_bert(bert_pretrained_name_or_path)
+        self.bert_model = get_pretrained_bert()
         self.bertmodule_outdim = self.bert_model.config.hidden_size
         self.early_concat = early_concat  # if True, (bert+sc)->lstm->linear, else ((sc->lstm)+bert)->linear
-        if freeze_bert:
-            # Uncomment to freeze BERT layers
-            for param in self.bert_model.parameters():
-                param.requires_grad = False
+        # Uncomment to freeze BERT layers
+        # for param in self.bert_model.parameters():
+        #     param.requires_grad = False
 
         # lstm module
         # expected  input dim: [BS,max_nwords,*] and batch_lengths as [BS] for pack_padded_sequence
@@ -785,7 +780,7 @@ class BertSCLSTM(nn.Module):
 
         # bert
         # BS X max_nsubwords x self.bertmodule_outdim
-        bert_encodings = self.bert_model(**batch_bert_dict, return_dict=False)[0]
+        bert_encodings, cls_encoding = self.bert_model(**batch_bert_dict, return_dict=False)
         bert_encodings = self.bert_dropout(bert_encodings)
         # BS X max_nwords x self.bertmodule_outdim
         bert_merged_encodings = pad_sequence(
@@ -805,7 +800,7 @@ class BertSCLSTM(nn.Module):
 
             # lstm
             # dim: [BS,max_nwords,*]->[BS,max_nwords,self.lstmmodule_outdim]
-            intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths,
+            intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths.cpu(),
                                                           batch_first=True, enforce_sorted=False)
             lstm_encodings, (last_hidden_states, last_cell_states) = self.lstmmodule(intermediate_encodings)
             lstm_encodings, _ = pad_packed_sequence(lstm_encodings, batch_first=True, padding_value=0)
@@ -823,7 +818,7 @@ class BertSCLSTM(nn.Module):
 
                 # lstm
             # dim: [BS,max_nwords,*]->[BS,max_nwords,self.lstmmodule_outdim]
-            intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths,
+            intermediate_encodings = pack_padded_sequence(intermediate_encodings, batch_lengths.cpu(),
                                                           batch_first=True, enforce_sorted=False)
             lstm_encodings, (last_hidden_states, last_cell_states) = self.lstmmodule(intermediate_encodings)
             lstm_encodings, _ = pad_packed_sequence(lstm_encodings, batch_first=True, padding_value=0)
@@ -852,7 +847,7 @@ class BertSCLSTM(nn.Module):
                 topk_inds = torch.argmax(probs, dim=-1)  # [BS,max_nwords]
 
             # Note that for those positions with padded_idx,
-            #   the arg_max_prob above computes a index because 
+            #   the arg_max_prob above computes a index because
             #   the bias term leads to non-uniform values in those positions
 
             return loss.cpu().detach().numpy(), topk_inds.cpu().detach().numpy()
@@ -864,16 +859,15 @@ class BertSCLSTM(nn.Module):
 #################################################
 
 class SubwordBert(nn.Module):
-    def __init__(self, padding_idx, output_dim, bert_pretrained_name_or_path=None, freeze_bert=False):
+    def __init__(self, screp_dim, padding_idx, output_dim):
         super(SubwordBert, self).__init__()
 
         self.bert_dropout = torch.nn.Dropout(0.2)
-        self.bert_model = get_pretrained_bert(bert_pretrained_name_or_path)
+        self.bert_model = get_pretrained_bert()
         self.bertmodule_outdim = self.bert_model.config.hidden_size
-        if freeze_bert:
-            # Uncomment to freeze BERT layers
-            for param in self.bert_model.parameters():
-                param.requires_grad = False
+        # Uncomment to freeze BERT layers
+        # for param in self.bert_model.parameters():
+        #     param.requires_grad = False
 
         # output module
         assert output_dim > 0
@@ -915,7 +909,7 @@ class SubwordBert(nn.Module):
 
         # bert
         # BS X max_nsubwords x self.bertmodule_outdim
-        bert_encodings = self.bert_model(**batch_bert_dict, return_dict=False)[0]
+        bert_encodings, cls_encoding = self.bert_model(**batch_bert_dict, return_dict=False)
         bert_encodings = self.bert_dropout(bert_encodings)
         # BS X max_nwords x self.bertmodule_outdim
         bert_merged_encodings = pad_sequence(
@@ -953,7 +947,7 @@ class SubwordBert(nn.Module):
                 topk_inds = torch.argmax(probs, dim=-1)  # [BS,max_nwords]
 
             # Note that for those positions with padded_idx,
-            #   the arg_max_prob above computes a index because 
+            #   the arg_max_prob above computes a index because
             #   the bias term leads to non-uniform values in those positions
 
             return loss.cpu().detach().numpy(), topk_inds.cpu().detach().numpy()

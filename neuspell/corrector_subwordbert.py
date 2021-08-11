@@ -1,36 +1,79 @@
 import os
 import time
-from typing import List, Dict, Union
+from typing import List
 
 import numpy as np
 import torch
 from pytorch_pretrained_bert import BertAdam
 
-from .commons import DEFAULT_TRAINTEST_DATA_PATH
-from .corrector import Corrector
+from .commons import ARXIV_CHECKPOINTS, Corrector
+from .seq_modeling.downloads import download_pretrained_model
 from .seq_modeling.helpers import bert_tokenize_for_valid_examples
-from .seq_modeling.helpers import load_data, load_vocab_dict, save_vocab_dict
+from .seq_modeling.helpers import load_data, load_vocab_dict, get_model_nparams, save_vocab_dict
 from .seq_modeling.helpers import train_validation_split, batch_iter, labelize, progressBar, batch_accuracy_func
 from .seq_modeling.subwordbert import load_model, load_pretrained, model_predictions, model_inference
 
 """ corrector module """
 
 
-class BertChecker(Corrector):
+class CorrectorSubwordBert(Corrector):
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, tokenize=True, pretrained=False, device="cpu"):
+        super(CorrectorSubwordBert, self).__init__()
+        self.tokenize = tokenize
+        self.pretrained = pretrained
+        self.device = device
 
-        self.bert_pretrained_name_or_path = "bert-base-cased"
+        self.ckpt_path = None
+        self.vocab_path, self.weights_path = "", ""
+        self.model, self.vocab = None, None
 
-    def load_model(self, ckpt_path):
+        if self.pretrained:
+            self.from_pretrained(self.ckpt_path)
+
+    def __model_status(self):
+        assert not (self.model is None or self.vocab is None), print("model & vocab must be loaded first")
+        return
+
+    def from_pretrained(self, ckpt_path=None, vocab="", weights=""):
+        self.ckpt_path = ckpt_path or ARXIV_CHECKPOINTS["subwordbert-probwordnoise"]
+        self.vocab_path = vocab if vocab else os.path.join(self.ckpt_path, "vocab.pkl")
+        if not os.path.isfile(self.vocab_path):  # leads to "FileNotFoundError"
+            download_pretrained_model(self.ckpt_path)
+        print(f"loading vocab from path:{self.vocab_path}")
+        self.vocab = load_vocab_dict(self.vocab_path)
         print(f"initializing model")
-        initialized_model = load_model(self.vocab)
-        self.model = load_pretrained(initialized_model, self.ckpt_path, device=self.device)
+        self.model = load_model(self.vocab)
+        self.weights_path = weights if weights else self.ckpt_path
+        print(f"loading pretrained weights from path:{self.weights_path}")
+        self.model = load_pretrained(self.model, self.weights_path, device=self.device)
+        return
+
+    def set_device(self, device='cpu'):
+        prev_device = self.device
+        device = "cuda" if (device == "gpu" and torch.cuda.is_available()) else "cpu"
+        if not (prev_device == device):
+            if self.model is not None:
+                # please load again, facing issues with just .to(new_device) and new_device
+                #   not same the old device, https://tinyurl.com/y57pcjvd
+                self.from_pretrained(self.ckpt_path, vocab=self.vocab_path, weights=self.weights_path)
+            self.device = device
+        print(f"model set to work on {device}")
+        return
+
+    def correct(self, x):
+        return self.correct_string(x)
+
+    def correct_string(self, mystring: str, return_all=False) -> str:
+        x = self.correct_strings([mystring], return_all=return_all)
+        if return_all:
+            return x[0][0], x[1][0]
+        else:
+            return x[0]
 
     def correct_strings(self, mystrings: List[str], return_all=False) -> List[str]:
-        self.is_model_ready()
-        mystrings = bert_tokenize_for_valid_examples(mystrings, mystrings, self.bert_pretrained_name_or_path)[0]
+        self.__model_status()
+        mystrings = bert_tokenize_for_valid_examples(mystrings, mystrings)[0]
         data = [(line, line) for line in mystrings]
         batch_size = 4 if self.device == "cpu" else 16
         return_strings = model_predictions(self.model, data, self.vocab, device=self.device, batch_size=batch_size)
@@ -39,12 +82,28 @@ class BertChecker(Corrector):
         else:
             return return_strings
 
-    def evaluate(self, clean_file, corrupt_file, data_dir=""):
-        self.is_model_ready()
-        data_dir = DEFAULT_TRAINTEST_DATA_PATH if data_dir == "default" else data_dir
+    def correct_from_file(self, src, dest="./clean_version.txt"):
+        """
+        src = f"{DEFAULT_DATA_PATH}/traintest/corrupt.txt"
+        """
+        self.__model_status()
+        x = [line.strip() for line in open(src, 'r')]
+        y = self.correct_strings(x)
+        print(f"saving results at: {dest}")
+        opfile = open(dest, 'w')
+        for line in y:
+            opfile.write(line + "\n")
+        opfile.close()
+        return
 
+    def evaluate(self, clean_file, corrupt_file):
+        """
+        clean_file = f"{DEFAULT_DATA_PATH}/traintest/clean.txt"
+        corrupt_file = f"{DEFAULT_DATA_PATH}/traintest/corrupt.txt"
+        """
+        self.__model_status()
         batch_size = 4 if self.device == "cpu" else 16
-        for x, y, z in zip([data_dir], [clean_file], [corrupt_file]):
+        for x, y, z in zip([""], [clean_file], [corrupt_file]):
             print(x, y, z)
             test_data = load_data(x, y, z)
             _ = model_inference(self.model,
@@ -55,40 +114,22 @@ class BertChecker(Corrector):
                                 vocab_=self.vocab)
         return
 
-    def from_huggingface(self, bert_pretrained_name_or_path, vocab: Union[Dict, str]):
-        self.bert_pretrained_name_or_path = bert_pretrained_name_or_path
-        if isinstance(vocab, str) and os.path.exists(vocab):
-            self.vocab_path = vocab
-            print(f"loading vocab from path:{self.vocab_path}")
-            self.vocab = load_vocab_dict(self.vocab_path)
-        elif isinstance(vocab, dict):
-            self.vocab = vocab
-        else:
-            raise ValueError(f"unknown vocab type or unable to find path: {type(vocab)}")
-        self.model = load_model(self.vocab, bert_pretrained_name_or_path=self.bert_pretrained_name_or_path)
-        self.model.to(self.device)
-        return
+    def model_size(self):
+        self.__model_status()
+        return get_model_nparams(self.model)
 
-    def finetune(self,
-                 clean_file,
-                 corrupt_file,
-                 data_dir="",
-                 validation_split=0.2,
-                 n_epochs=2,
-                 new_vocab_list: List = None):
+    def finetune(self, clean_file, corrupt_file, validation_split=0.2, n_epochs=2, new_vocab_list=[]):
 
         if new_vocab_list:
-            raise NotImplementedError("Do not currently support modifying output vocabulary of the models "
-                                      "in the finetune step; however, new vocab is accepted at training time.")
+            raise NotImplementedError("Do not currently support modifying output vocabulary of the models")
 
         # load data and split in train-validation
-        data_dir = DEFAULT_TRAINTEST_DATA_PATH if data_dir == "default" else data_dir
-        train_data = load_data(data_dir, clean_file, corrupt_file)
+        train_data = load_data("", clean_file, corrupt_file)
         train_data, valid_data = train_validation_split(train_data, 0.8, seed=11690)
         print("len of train and test data: ", len(train_data), len(valid_data))
 
         # load vocab and model
-        self.is_model_ready()
+        self.__model_status()
 
         # finetune
         #############################################
@@ -99,16 +140,7 @@ class BertChecker(Corrector):
         GRADIENT_ACC = 4
         DEVICE = self.device
         START_EPOCH, N_EPOCHS = 0, n_epochs
-        CHECKPOINT_PATH = os.path.join(self.ckpt_path if self.ckpt_path else data_dir, "new_models",
-                                       os.path.split(self.bert_pretrained_name_or_path)[-1])
-        if os.path.exists(CHECKPOINT_PATH):
-            num = 1
-            while True:
-                NEW_CHECKPOINT_PATH = CHECKPOINT_PATH + f"-{num}"
-                if not os.path.exists(NEW_CHECKPOINT_PATH):
-                    break
-                num += 1
-            CHECKPOINT_PATH = NEW_CHECKPOINT_PATH
+        CHECKPOINT_PATH = os.path.join(self.ckpt_path, "finetuned_model")
         VOCAB_PATH = os.path.join(CHECKPOINT_PATH, "vocab.pkl")
         if not os.path.exists(CHECKPOINT_PATH):
             os.makedirs(CHECKPOINT_PATH)
@@ -126,8 +158,6 @@ class BertChecker(Corrector):
             {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
         t_total = int(len(train_data) / TRAIN_BATCH_SIZE / GRADIENT_ACC * N_EPOCHS)
-        if t_total == 0:
-            t_total = 1
         optimizer = BertAdam(optimizer_grouped_parameters, lr=5e-5, warmup=0.1, t_total=t_total)
 
         # model to device
@@ -135,15 +165,14 @@ class BertChecker(Corrector):
 
         # load parameters if not training from scratch
         if START_EPOCH > 1:
-            progress_write_file = (
-                open(os.path.join(CHECKPOINT_PATH, f"progress_retrain_from_epoch{START_EPOCH}.txt"), 'w')
-            )
+            progress_write_file = open(os.path.join(CHECKPOINT_PATH, f"progress_retrain_from_epoch{START_EPOCH}.txt"),
+                                       'w')
             model, optimizer, max_dev_acc, argmax_dev_acc = load_pretrained(model, CHECKPOINT_PATH, optimizer=optimizer)
             progress_write_file.write(f"Training model params after loading from path: {CHECKPOINT_PATH}\n")
         else:
             progress_write_file = open(os.path.join(CHECKPOINT_PATH, "progress.txt"), 'w')
-            print(f"Training model params")
-            progress_write_file.write(f"Training model params\n")
+            print(f"Training model params from scratch")
+            progress_write_file.write(f"Training model params from scratch\n")
         progress_write_file.flush()
 
         # train and eval
@@ -170,8 +199,8 @@ class BertChecker(Corrector):
             for batch_id, (batch_labels, batch_sentences) in enumerate(train_data_iter):
                 st_time = time.time()
                 # set batch data for bert
-                batch_labels_, batch_sentences_, batch_bert_inp, batch_bert_splits = \
-                    bert_tokenize_for_valid_examples(batch_labels, batch_sentences, self.bert_pretrained_name_or_path)
+                batch_labels_, batch_sentences_, batch_bert_inp, batch_bert_splits = bert_tokenize_for_valid_examples(
+                    batch_labels, batch_sentences)
                 if len(batch_labels_) == 0:
                     print("################")
                     print("Not training the following lines due to pre-processing mismatch: \n")
@@ -183,7 +212,7 @@ class BertChecker(Corrector):
                 batch_bert_inp = {k: v.to(DEVICE) for k, v in batch_bert_inp.items()}
                 # set batch data for others
                 batch_labels, batch_lengths = labelize(batch_labels, vocab)
-                # batch_lengths = batch_lengths.to(device)
+                batch_lengths = batch_lengths.to(DEVICE)
                 batch_labels = batch_labels.to(DEVICE)
                 # forward
                 model.train()
@@ -222,8 +251,7 @@ class BertChecker(Corrector):
                     nb = int(np.ceil(len(train_data) / TRAIN_BATCH_SIZE))
                     progress_write_file.write(f"{batch_id + 1}/{nb}\n")
                     progress_write_file.write(
-                        f"batch_time: {time.time() - st_time}, avg_batch_loss: {train_loss / (batch_id + 1)}, "
-                        f"avg_batch_acc: {train_acc / train_acc_count}\n")
+                        f"batch_time: {time.time() - st_time}, avg_batch_loss: {train_loss / (batch_id + 1)}, avg_batch_acc: {train_acc / train_acc_count}\n")
                     progress_write_file.flush()
             print(f"\nEpoch {epoch_id} train_loss: {train_loss / (batch_id + 1)}")
 
@@ -237,8 +265,8 @@ class BertChecker(Corrector):
             for batch_id, (batch_labels, batch_sentences) in enumerate(valid_data_iter):
                 st_time = time.time()
                 # set batch data for bert
-                batch_labels_, batch_sentences_, batch_bert_inp, batch_bert_splits = \
-                    bert_tokenize_for_valid_examples(batch_labels, batch_sentences, self.bert_pretrained_name_or_path)
+                batch_labels_, batch_sentences_, batch_bert_inp, batch_bert_splits = bert_tokenize_for_valid_examples(
+                    batch_labels, batch_sentences)
                 if len(batch_labels_) == 0:
                     print("################")
                     print("Not validating the following lines due to pre-processing mismatch: \n")
@@ -250,7 +278,7 @@ class BertChecker(Corrector):
                 batch_bert_inp = {k: v.to(DEVICE) for k, v in batch_bert_inp.items()}
                 # set batch data for others
                 batch_labels, batch_lengths = labelize(batch_labels, vocab)
-                # batch_lengths = batch_lengths.to(device)
+                batch_lengths = batch_lengths.to(DEVICE)
                 batch_labels = batch_labels.to(DEVICE)
                 # forward
                 model.eval()
@@ -274,29 +302,27 @@ class BertChecker(Corrector):
                     nb = int(np.ceil(len(valid_data) / VALID_BATCH_SIZE))
                     progress_write_file.write(f"{batch_id}/{nb}\n")
                     progress_write_file.write(
-                        f"batch_time: {time.time() - st_time}, avg_batch_loss: {valid_loss / (batch_id + 1)}, "
-                        f"avg_batch_acc: {valid_acc / (batch_id + 1)}\n")
+                        f"batch_time: {time.time() - st_time}, avg_batch_loss: {valid_loss / (batch_id + 1)}, avg_batch_acc: {valid_acc / (batch_id + 1)}\n")
                     progress_write_file.flush()
             print(f"\nEpoch {epoch_id} valid_loss: {valid_loss / (batch_id + 1)}")
 
             # save model, optimizer and test_predictions if val_acc is improved
             if valid_acc >= max_dev_acc:
-                print(f"validation accuracy improved from {max_dev_acc:.4f} to {valid_acc:.4f}")
-                # name = "model.pth.tar".format(epoch_id)
-                # torch.save({
-                #     'epoch_id': epoch_id,
-                #     'max_dev_acc': max_dev_acc,
-                #     'argmax_dev_acc': argmax_dev_acc,
-                #     'model_state_dict': model.state_dict(),
-                #     'optimizer_state_dict': optimizer.state_dict()},
-                #     os.path.join(CHECKPOINT_PATH, name))
-                name = "pytorch_model.bin"
-                torch.save(model.state_dict(), os.path.join(CHECKPOINT_PATH, name))
+                # to file
+                # name = "model-epoch{}.pth.tar".format(epoch_id)
+                name = "model.pth.tar".format(epoch_id)
+                torch.save({
+                    'epoch_id': epoch_id,
+                    'max_dev_acc': max_dev_acc,
+                    'argmax_dev_acc': argmax_dev_acc,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict()},
+                    os.path.join(CHECKPOINT_PATH, name))
                 print("Model saved at {} in epoch {}".format(os.path.join(CHECKPOINT_PATH, name), epoch_id))
                 save_vocab_dict(VOCAB_PATH, vocab)
 
                 # re-assign
                 max_dev_acc, argmax_dev_acc = valid_acc, epoch_id
 
-        print(f"Model and logs saved at {CHECKPOINT_PATH}")
+        print(f"Model and logs saved at {os.path.join(CHECKPOINT_PATH, 'model.pth.tar')}")
         return

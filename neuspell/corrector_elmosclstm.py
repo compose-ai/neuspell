@@ -5,11 +5,11 @@ from typing import List
 import numpy as np
 import torch
 
-from .commons import spacy_tokenizer, DEFAULT_TRAINTEST_DATA_PATH
-from .corrector import Corrector
-from .seq_modeling.helpers import load_data, sclstm_tokenize, save_vocab_dict
+from .commons import spacy_tokenizer, ARXIV_CHECKPOINTS, Corrector
+from .seq_modeling.downloads import download_pretrained_model
+from .seq_modeling.helpers import load_data, load_vocab_dict, get_model_nparams, sclstm_tokenize, save_vocab_dict
 from .seq_modeling.helpers import train_validation_split, batch_iter, labelize, progressBar, batch_accuracy_func
-from .util import is_module_available, get_module_or_attr
+from .seq_modeling.util import is_module_available, get_module_or_attr
 
 if is_module_available("allennlp"):
     from .seq_modeling.elmosclstm import load_model, load_pretrained, model_predictions, model_inference
@@ -17,24 +17,68 @@ if is_module_available("allennlp"):
 """ corrector module """
 
 
-class ElmosclstmChecker(Corrector):
+class CorrectorElmoSCLstm(Corrector):
 
-    def __init__(self, **kwargs):
+    def __init__(self, tokenize=True, pretrained=False, device="cpu"):
+        super(CorrectorElmoSCLstm, self).__init__()
 
         if not is_module_available("allennlp"):
             raise ImportError(
-                "install `allennlp` by running `pip install -r extras-requirements.txt`. "
-                "See `README.md` for more info.")
+                "install `allennlp` by running `pip install -r extras-requirements.txt`. See `README.md` for more info.")
 
-        super().__init__(**kwargs)
+        self.tokenize = tokenize
+        self.pretrained = pretrained
+        self.device = device
 
-    def load_model(self, ckpt_path):
+        self.ckpt_path = None
+        self.vocab_path, self.weights_path = "", ""
+        self.model, self.vocab = None, None
+
+        if self.pretrained:
+            self.from_pretrained(self.ckpt_path)
+
+    def __model_status(self):
+        assert not (self.model is None or self.vocab is None), print("model & vocab must be loaded first")
+        return
+
+    def from_pretrained(self, ckpt_path=None, vocab="", weights=""):
+        self.ckpt_path = ckpt_path or ARXIV_CHECKPOINTS["elmoscrnn-probwordnoise"]
+        self.vocab_path = vocab if vocab else os.path.join(self.ckpt_path, "vocab.pkl")
+        if not os.path.isfile(self.vocab_path):  # leads to "FileNotFoundError"
+            download_pretrained_model(self.ckpt_path)
+        print(f"loading vocab from path:{self.vocab_path}")
+        self.vocab = load_vocab_dict(self.vocab_path)
         print(f"initializing model")
-        initialized_model = load_model(self.vocab)
-        self.model = load_pretrained(initialized_model, self.ckpt_path, device=self.device)
+        self.model = load_model(self.vocab)
+        self.weights_path = weights if weights else self.ckpt_path
+        print(f"loading pretrained weights from path:{self.weights_path}")
+        self.model = load_pretrained(self.model, self.weights_path, device=self.device)
+        return
+
+    def set_device(self, device='cpu'):
+        prev_device = self.device
+        device = "cuda" if (device == "gpu" and torch.cuda.is_available()) else "cpu"
+        if not (prev_device == device):
+            if self.model is not None:
+                # please load again, facing issues with just .to(new_device) and new_device
+                #   not same the old device, https://tinyurl.com/y57pcjvd
+                self.from_pretrained(self.ckpt_path, vocab=self.vocab_path, weights=self.weights_path)
+            self.device = device
+        print(f"model set to work on {device}")
+        return
+
+    def correct(self, x):
+        return self.correct_string(x)
+
+    def correct_string(self, mystring: str, return_all=False) -> str:
+        x = self.correct_strings([mystring], return_all=return_all)
+        if return_all:
+            return x[0][0], x[1][0]
+        else:
+            return x[0]
 
     def correct_strings(self, mystrings: List[str], return_all=False) -> List[str]:
-        self.is_model_ready()
+        self.__model_status()
         if self.tokenize:
             mystrings = [spacy_tokenizer(my_str) for my_str in mystrings]
         data = [(line, line) for line in mystrings]
@@ -45,12 +89,28 @@ class ElmosclstmChecker(Corrector):
         else:
             return return_strings
 
-    def evaluate(self, clean_file, corrupt_file, data_dir=""):
-        self.is_model_ready()
-        data_dir = DEFAULT_TRAINTEST_DATA_PATH if data_dir == "default" else data_dir
+    def correct_from_file(self, src, dest="./clean_version.txt"):
+        """
+        src = f"{DEFAULT_DATA_PATH}/traintest/corrupt.txt"
+        """
+        self.__model_status()
+        x = [line.strip() for line in open(src, 'r')]
+        y = self.correct_strings(x)
+        print(f"saving results at: {dest}")
+        opfile = open(dest, 'w')
+        for line in y:
+            opfile.write(line + "\n")
+        opfile.close()
+        return
 
+    def evaluate(self, clean_file, corrupt_file):
+        """
+        clean_file = f"{DEFAULT_DATA_PATH}/traintest/clean.txt"
+        corrupt_file = f"{DEFAULT_DATA_PATH}/traintest/corrupt.txt"
+        """
+        self.__model_status()
         batch_size = 4 if self.device == "cpu" else 16
-        for x, y, z in zip([data_dir], [clean_file], [corrupt_file]):
+        for x, y, z in zip([""], [clean_file], [corrupt_file]):
             print(x, y, z)
             test_data = load_data(x, y, z)
             _ = model_inference(self.model,
@@ -58,23 +118,27 @@ class ElmosclstmChecker(Corrector):
                                 topk=1,
                                 device=self.device,
                                 batch_size=batch_size,
+                                beam_search=False,
+                                selected_lines_file=None,
                                 vocab_=self.vocab)
         return
 
-    def finetune(self, clean_file, corrupt_file, data_dir="", validation_split=0.2, n_epochs=2,
-                 new_vocab_list: List = None):
+    def model_size(self):
+        self.__model_status()
+        return get_model_nparams(self.model)
+
+    def finetune(self, clean_file, corrupt_file, validation_split=0.2, n_epochs=2, new_vocab_list=[]):
 
         if new_vocab_list:
             raise NotImplementedError("Do not currently support modifying output vocabulary of the models")
 
         # load data and split in train-validation
-        data_dir = DEFAULT_TRAINTEST_DATA_PATH if data_dir == "default" else data_dir
-        train_data = load_data(data_dir, clean_file, corrupt_file)
+        train_data = load_data("", clean_file, corrupt_file)
         train_data, valid_data = train_validation_split(train_data, 0.8, seed=11690)
         print("len of train and test data: ", len(train_data), len(valid_data))
 
         # load vocab and model
-        self.is_model_ready()
+        self.__model_status()
 
         # finetune
         #############################################
@@ -85,16 +149,7 @@ class ElmosclstmChecker(Corrector):
         GRADIENT_ACC = 4
         DEVICE = self.device
         START_EPOCH, N_EPOCHS = 0, n_epochs
-        CHECKPOINT_PATH = os.path.join(self.ckpt_path if self.ckpt_path else data_dir, "new_models",
-                                       os.path.split(self.bert_pretrained_name_or_path)[-1])
-        if os.path.exists(CHECKPOINT_PATH):
-            num = 1
-            while True:
-                NEW_CHECKPOINT_PATH = CHECKPOINT_PATH + f"-{num}"
-                if not os.path.exists(NEW_CHECKPOINT_PATH):
-                    break
-                num += 1
-            CHECKPOINT_PATH = NEW_CHECKPOINT_PATH
+        CHECKPOINT_PATH = os.path.join(self.ckpt_path, "finetuned_model")
         VOCAB_PATH = os.path.join(CHECKPOINT_PATH, "vocab.pkl")
         if not os.path.exists(CHECKPOINT_PATH):
             os.makedirs(CHECKPOINT_PATH)
@@ -150,7 +205,7 @@ class ElmosclstmChecker(Corrector):
                 batch_idxs, batch_lengths_ = sclstm_tokenize(batch_sentences, vocab)
                 assert (batch_lengths_ == batch_lengths).all() == True
                 batch_idxs = [batch_idxs_.to(DEVICE) for batch_idxs_ in batch_idxs]
-                # batch_lengths = batch_lengths.to(device)
+                batch_lengths = batch_lengths.to(DEVICE)
                 batch_labels = batch_labels.to(DEVICE)
                 elmo_batch_to_ids = get_module_or_attr("allennlp.modules.elmo", "batch_to_ids")
                 batch_elmo_inp = elmo_batch_to_ids([line.split() for line in batch_sentences]).to(DEVICE)
@@ -203,7 +258,7 @@ class ElmosclstmChecker(Corrector):
                     batch_idxs, batch_lengths_ = sclstm_tokenize(batch_sentences, vocab)
                     assert (batch_lengths_ == batch_lengths).all() == True
                     batch_idxs = [batch_idxs_.to(DEVICE) for batch_idxs_ in batch_idxs]
-                    # batch_lengths = batch_lengths.to(device)
+                    batch_lengths = batch_lengths.to(DEVICE)
                     batch_labels = batch_labels.to(DEVICE)
                     elmo_batch_to_ids = get_module_or_attr("allennlp.modules.elmo", "batch_to_ids")
                     batch_elmo_inp = elmo_batch_to_ids([line.split() for line in batch_sentences]).to(DEVICE)
