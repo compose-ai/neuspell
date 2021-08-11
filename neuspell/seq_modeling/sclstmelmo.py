@@ -1,10 +1,10 @@
 import time
+from pathlib import Path
 
-from .downloads import download_pretrained_model
 from .evals import get_metrics
 from .helpers import *
 from .models import ElmoSCLSTM
-from .util import get_module_or_attr
+from .util import is_module_available, get_module_or_attr
 
 """
 NEW: reranking snippets
@@ -17,8 +17,8 @@ HFACE_batch_size = 8
 
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 
-gpt2Tokenizer = GPT2Tokenizer.from_pretrained('gpt2-medium')
-gpt2LMHeadModel = GPT2LMHeadModel.from_pretrained('gpt2-medium')
+gpt2Tokenizer = GPT2Tokenizer.from_pretrained('gpt2-medium', cache_dir=Path('.'))
+gpt2LMHeadModel = GPT2LMHeadModel.from_pretrained('gpt2-medium', cache_dir=Path('.'))
 gpt2Tokenizer.pad_token = gpt2Tokenizer.eos_token
 
 
@@ -62,36 +62,14 @@ def get_losses_from_txl_lm(this_sents: "list[str]", txlLMHeadModel, txlTokenizer
 def load_model(vocab, verbose=False):
     model = ElmoSCLSTM(3 * len(vocab["chartoken2idx"]), vocab["token2idx"][vocab["pad_token"]],
                        len(vocab["token_freq"]), early_concat=False)
-
     if verbose:
         print(model)
-    print(f"Number of parameters in the model: {get_model_nparams(model)}")
+    print(get_model_nparams(model))
 
     return model
 
 
 def load_pretrained(model, checkpoint_path, optimizer=None, device='cuda'):
-    if optimizer:
-        raise Exception("If you want optimizer, call `load_pretrained_large(...)` instead of `load_pretrained(...)`")
-
-    if torch.cuda.is_available() and device != "cpu":
-        map_location = lambda storage, loc: storage.cuda()
-    else:
-        map_location = 'cpu'
-    print(f"Loading model params from checkpoint dir: {checkpoint_path}")
-
-    try:
-        checkpoint_data = torch.load(os.path.join(checkpoint_path, "pytorch_model.bin"), map_location=map_location)
-    except FileNotFoundError:
-        download_pretrained_model(checkpoint_path)
-        checkpoint_data = torch.load(os.path.join(checkpoint_path, "pytorch_model.bin"), map_location=map_location)
-
-    model.load_state_dict(checkpoint_data)
-
-    return model
-
-
-def load_pretrained_large(model, checkpoint_path, optimizer=None, device='cuda'):
     if torch.cuda.is_available() and device != "cpu":
         map_location = lambda storage, loc: storage.cuda()
     else:
@@ -115,7 +93,7 @@ def load_pretrained_large(model, checkpoint_path, optimizer=None, device='cuda')
 def model_predictions(model, data, vocab, device, batch_size=16, backoff="pass-through"):
     """
     model: an instance of ElmoSCLSTM
-    data: list of tuples, with each tuple consisting of correct and incorrect 
+    data: list of tuples, with each tuple consisting of correct and incorrect
             sentence string (would be split at whitespaces)
     """
 
@@ -134,7 +112,7 @@ def model_predictions(model, data, vocab, device, batch_size=16, backoff="pass-t
         batch_idxs, batch_lengths_ = sclstm_tokenize(batch_corrupt_sentences, vocab)
         assert (batch_lengths_ == batch_lengths).all() == True
         batch_idxs = [batch_idxs_.to(device) for batch_idxs_ in batch_idxs]
-        # batch_lengths = batch_lengths.to(device)
+        batch_lengths = batch_lengths.to(device)
         batch_labels = batch_labels.to(device)
         elmo_batch_to_ids = get_module_or_attr("allennlp.modules.elmo", "batch_to_ids")
         batch_elmo_inp = elmo_batch_to_ids([line.split() for line in batch_corrupt_sentences]).to(device)
@@ -154,7 +132,7 @@ def model_predictions(model, data, vocab, device, batch_size=16, backoff="pass-t
 def model_inference(model, data, topk, device, batch_size=16, beam_search=False, selected_lines_file=None, vocab_=None):
     """
     model: an instance of ElmoSCLSTM
-    data: list of tuples, with each tuple consisting of correct and incorrect 
+    data: list of tuples, with each tuple consisting of correct and incorrect
             sentence string (would be split at whitespaces)
     topk: how many of the topk softmax predictions are considered for metrics calculations
     device: "cuda:0" or "cpu"
@@ -193,7 +171,7 @@ def model_inference(model, data, topk, device, batch_size=16, beam_search=False,
         batch_idxs, batch_lengths_ = sclstm_tokenize(batch_corrupt_sentences, vocab)
         assert (batch_lengths_ == batch_lengths).all() == True
         batch_idxs = [batch_idxs_.to(device) for batch_idxs_ in batch_idxs]
-        # batch_lengths = batch_lengths.to(device)
+        batch_lengths = batch_lengths.to(device)
         batch_labels = batch_labels.to(device)
         elmo_batch_to_ids = get_module_or_attr("allennlp.modules.elmo", "batch_to_ids")
         batch_elmo_inp = elmo_batch_to_ids([line.split() for line in batch_corrupt_sentences]).to(device)
@@ -320,8 +298,8 @@ def model_inference(model, data, topk, device, batch_size=16, beam_search=False,
         # '''
         # # update progress
         # progressBar(batch_id+1,
-        #             int(np.ceil(len(data) / VALID_batch_size)), 
-        #             ["batch_time","batch_loss","avg_batch_loss","batch_acc","avg_batch_acc"], 
+        #             int(np.ceil(len(data) / VALID_batch_size)),
+        #             ["batch_time","batch_loss","avg_batch_loss","batch_acc","avg_batch_acc"],
         #             [time.time()-st_time,batch_loss,valid_loss/(batch_id+1),None,None])
         # '''
 
